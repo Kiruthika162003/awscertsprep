@@ -1,0 +1,32 @@
+{
+
+  "fileLocations": [
+
+    {
+
+      "URIPrefixes": [
+
+        "s3://subkriti/quiz_logs/"
+
+      ]
+
+    }
+
+
+
+  ],
+
+  "globalUploadSettings": {
+
+    "format": "CSV",
+
+    "delimiter": ",",
+
+    "textqualifier": "\"",
+
+    "containsHeader": "true"
+
+  }
+
+}
+
