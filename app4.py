@@ -7,6 +7,10 @@ import pandas as pd
 import uuid
 from io import StringIO
 
+# Get credentials from Streamlit secrets
+aws_access_key_id = st.secrets["aws_access_key_id"]
+aws_secret_access_key = st.secrets["aws_secret_access_key"]
+
 # --- CONFIG ---
 st.set_page_config(page_title="CertMaster AI", layout="wide")
 
