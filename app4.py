@@ -7,10 +7,6 @@ import pandas as pd
 import uuid
 from io import StringIO
 
-# Get credentials from Streamlit secrets
-aws_access_key_id = st.secrets["aws_access_key_id"]
-aws_secret_access_key = st.secrets["aws_secret_access_key"]
-
 # --- CONFIG ---
 st.set_page_config(page_title="CertMaster AI", layout="wide")
 
@@ -85,10 +81,36 @@ with col2:
 if cert_name and target_date:
     st.success(f"Great! You're aiming for **{cert_name}** by **{target_date}**.")
 
+# --- BEDROCK CLIENT (Cached) ---
+@st.cache_resource
+def get_bedrock_client():
+    try:
+        # Attempt to create a Bedrock client using credentials from Streamlit secrets
+        bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name="us-east-1",  # Replace with your AWS region
+            aws_access_key_id=st.secrets["aws_access_key_id"],
+            aws_secret_access_key=st.secrets["aws_secret_access_key"],
+        )
+        st.info("Using credentials from Streamlit Secrets.")
+        return bedrock  # Return the Bedrock client if creation is successful
+    except Exception as e:
+        st.error(f"Error creating Bedrock client from Streamlit Secrets: {e}")
+        # If Streamlit Secrets fail, attempt to create a Bedrock client using IAM role
+        try:
+            bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+            st.info("Using IAM Role.")
+            return bedrock  # Return the Bedrock client if creation is successful
+        except Exception as e:
+            st.error(f"Error creating Bedrock client from IAM Role: {e}")
+            st.stop()  # Stop execution if client creation fails
+
+bedrock = get_bedrock_client()
+
 # --- STEP 2: GENERATE STUDY PLAN ---
 st.header("Step 2: AI-Powered Study Plan")
+
 def generate_cert_study_plan(cert_name, days_left):
-    bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
     prompt = f"""You are an AWS Certified Instructor.
 
 Create a **comprehensive, day-by-day study plan** for the AWS **{cert_name}** exam to be completed in **{days_left} days**.
@@ -109,24 +131,32 @@ Day N - Final Mock Test, Time Management, Exam Day Tips
 Keep it motivating and realistic.
 """
     body = json.dumps({"prompt": prompt})
-    response = bedrock.invoke_model(
-        modelId="meta.llama3-70b-instruct-v1:0",
-        contentType="application/json",
-        accept="application/json",
-        body=body,
-    )
-    result = json.loads(response["body"].read())
-    return result.get("generation", result.get("outputText", "No study plan generated."))
+    try:
+        response = bedrock.invoke_model(
+            modelId="meta.llama3-70b-instruct-v1:0",
+            contentType="application/json",
+            accept="application/json",
+            body=body.encode("utf-8"),
+        )
+        result = json.loads(response["body"].read().decode("utf-8"))
+        return result.get("generation", result.get("outputText", "No study plan generated."))
+    except Exception as e:
+        st.error(f"Error generating study plan: {str(e)}")
+        return None
 
 today = datetime.date.today()
 days_left = (target_date - today).days
 if st.button("Generate Study Plan"):
     with st.spinner("Generating study plan..."):
         full_study_plan = generate_cert_study_plan(cert_name, days_left)
-        st.session_state["study_plan"] = full_study_plan
+        if full_study_plan: # Only update session state if the study plan was generated
+            st.session_state["study_plan"] = full_study_plan
 if "study_plan" in st.session_state:
     st.subheader("Your Personalized Study Plan")
-    st.markdown(st.session_state["study_plan"].replace("\n", "  \n"))
+    if st.session_state["study_plan"]: # Only display if study_plan has data
+        st.markdown(st.session_state["study_plan"].replace("\n", "  \n"))
+    else:
+        st.warning("No study plan available. Please try generating it again.")
 
 # --- STEP 3: QUIZ GENERATION ---
 st.header("Step 3: Practice Quiz")
@@ -134,7 +164,6 @@ quiz_topic = st.text_input("Enter a topic for the quiz:")
 if quiz_topic:
     if st.button("Generate Quiz"):
         def generate_questions_llama(topic, cert):
-            bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
             prompt = f"""You are a trainer for AWS {cert}.
 Generate 5 multiple-choice questions on '{topic}'.
 Format:
@@ -144,19 +173,27 @@ B) Option
 C) Option
 Answer: A - Explanation"""
             body = json.dumps({"prompt": prompt})
-            response = bedrock.invoke_model(
-                modelId="meta.llama3-70b-instruct-v1:0",
-                contentType="application/json",
-                accept="application/json",
-                body=body,
-            )
-            result = json.loads(response["body"].read())
-            return result.get("generation", result.get("outputText", "No questions generated."))
+            try:
+                response = bedrock.invoke_model(
+                    modelId="meta.llama3-70b-instruct-v1:0",
+                    contentType="application/json",
+                    accept="application/json",
+                    body=body.encode("utf-8"),
+                )
+                result = json.loads(response["body"].read().decode("utf-8"))
+                return result.get("generation", result.get("outputText", "No questions generated."))
+            except Exception as e:
+                st.error(f"Error generating quiz questions: {str(e)}")
+                return None
 
         raw_quiz = generate_questions_llama(quiz_topic, cert_name)
-        pattern = r"Q\d+:.*?(?=Q\d+:|$)"
-        questions = re.findall(pattern, raw_quiz, re.DOTALL)
-        st.session_state["quiz_questions"] = questions
+        if raw_quiz: #only proceed if raw_quiz has values
+            pattern = r"Q\d+:.*?(?=Q\d+:|$)"
+            questions = re.findall(pattern, raw_quiz, re.DOTALL)
+            st.session_state["quiz_questions"] = questions
+        else:
+            st.warning("Failed to generate quiz. Please try again.")
+
 
 # --- TAKE THE QUIZ ---
 if "quiz_questions" in st.session_state:
@@ -241,7 +278,6 @@ st.header("Step 5: AI Mentor's Answer")
 if st.button("Get AI Answer to My Question"):
     with st.spinner("Generating expert answer..."):
         try:
-            bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
             prompt = f"""
 You are a highly experienced AWS Certification Mentor.
 Answer this user's question in a helpful, detailed, and accurate way.
@@ -254,16 +290,18 @@ User's Question:
                 modelId="meta.llama3-70b-instruct-v1:0",
                 contentType="application/json",
                 accept="application/json",
-                body=body,
+                body=body.encode("utf-8"),
             )
-            result = json.loads(response["body"].read())
+            result = json.loads(response["body"].read().decode("utf-8"))
             ai_answer = result.get("generation", result.get("outputText", "No answer generated."))
 
             # Store the AI answer in session state
             st.session_state["ai_answer"] = ai_answer
 
             # Save to S3
-            s3 = boto3.client("s3")
+            s3 = boto3.client("s3",  #added credentials here as well, in case the bedrock client wasn't instantiated with streamlits
+            aws_access_key_id=st.secrets["aws_access_key_id"],
+            aws_secret_access_key=st.secrets["aws_secret_access_key"],)
             safe_name = re.sub(r"[^a-zA-Z0-9]", "_", st.session_state["user_name"])
             file_key = f"certmaster-answers/{safe_name}/{str(uuid.uuid4())}.txt"
             combined_text = f"Q: {st.session_state['last_question']}\n\nA:\n{ai_answer}"
@@ -275,8 +313,3 @@ User's Question:
             if "ai_answer" in st.session_state:
                 st.success("Here’s what your AI mentor says:")
                 st.markdown(st.session_state["ai_answer"].replace("\n", "  \n"))
-
-# Display the AI answer if it exists in session state
-#if "ai_answer" in st.session_state: #removed since printing in finally block
-#    st.success("Here’s what your AI mentor says:")
-#    st.markdown(st.session_state["ai_answer"].replace("\n", "  \n"))
